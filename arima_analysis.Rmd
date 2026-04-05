@@ -1,0 +1,232 @@
+---
+title: "ARIMA Analysis of Kalshi Prediction Market Prices"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+library(tidyverse)
+library(forecast)
+library(tseries)
+```
+
+---
+
+## Load and Prepare Data
+
+```{r load-data}
+trades <- read_csv("trades_clean.csv")
+
+# Parse timestamps, sort by contract then time
+trades <- trades %>%
+  mutate(created_time = as.POSIXct(created_time, tz = "UTC")) %>%
+  arrange(ticker, created_time)
+
+glimpse(trades)
+```
+
+---
+
+## Pick a Representative Contract
+
+We select a contract with enough trades to fit a time series model. We use `yes_price` as the price series.
+
+```{r select-contract}
+# Find contracts with the most trades
+trade_counts <- trades %>%
+  count(ticker, sort = TRUE)
+
+print(head(trade_counts, 10))
+
+# Use the most-traded contract
+selected_ticker <- trade_counts$ticker[1]
+cat("Selected ticker:", selected_ticker, "\n")
+
+contract_trades <- trades %>%
+  filter(ticker == selected_ticker) %>%
+  select(created_time, yes_price, outcome) %>%
+  arrange(created_time)
+
+cat("Number of trades:", nrow(contract_trades), "\n")
+cat("Outcome:", unique(contract_trades$outcome), "\n")
+```
+
+---
+
+## Price Series Plot
+
+```{r plot-price}
+ggplot(contract_trades, aes(x = created_time, y = yes_price)) +
+  geom_line(color = "steelblue") +
+  geom_point(size = 0.8, alpha = 0.5) +
+  labs(
+    title = paste("Yes Price Over Time:", selected_ticker),
+    x = "Time",
+    y = "Yes Price (implied probability)"
+  ) +
+  theme_minimal()
+```
+
+---
+
+## ACF and PACF of Raw Price Series
+
+Before fitting ARIMA, we inspect autocorrelation in the raw price series.
+
+```{r acf-raw}
+price_ts <- ts(contract_trades$yes_price)
+
+par(mfrow = c(1, 2))
+acf(price_ts, main = "ACF of Yes Price", lag.max = 30)
+pacf(price_ts, main = "PACF of Yes Price", lag.max = 30)
+par(mfrow = c(1, 1))
+```
+
+---
+
+## Stationarity Test (ADF)
+
+An Augmented Dickey-Fuller test checks for a unit root — a hallmark of a random walk.
+
+- **Null hypothesis**: series has a unit root (random walk / non-stationary)
+- **p < 0.05**: reject the null → series is stationary
+
+```{r adf-test}
+adf_result <- adf.test(price_ts)
+print(adf_result)
+```
+
+---
+
+## Fit ARIMA Model
+
+We use `auto.arima()` to select the best ARIMA(p, d, q) model based on AIC. A model with `d = 1` indicates the series needed differencing — consistent with a random walk.
+
+```{r fit-arima}
+arima_model <- auto.arima(price_ts, stepwise = FALSE, approximation = FALSE)
+summary(arima_model)
+```
+
+---
+
+## Residual Diagnostics
+
+If prices are a **random walk**, ARIMA residuals should be white noise — no autocorrelation.
+If residuals show autocorrelation, past prices carry predictive information.
+
+```{r residual-diagnostics}
+checkresiduals(arima_model)
+```
+
+```{r acf-residuals}
+acf(residuals(arima_model),
+    main = paste("ACF of ARIMA Residuals\n(", selected_ticker, ")"),
+    lag.max = 30)
+```
+
+---
+
+## Ljung-Box Test on Residuals
+
+Formally tests whether residuals are white noise across multiple lags.
+
+- **Null hypothesis**: residuals are white noise (random walk behavior)
+- **p < 0.05**: significant autocorrelation remains → past prices are predictive
+
+```{r ljung-box}
+lb_test <- Box.test(residuals(arima_model), lag = 20, type = "Ljung-Box")
+print(lb_test)
+```
+
+---
+
+## Interpretation
+
+```{r interpretation}
+d_order <- arima_model$arma[6]  # differencing order from auto.arima
+lb_p <- lb_test$p.value
+adf_p <- adf_result$p.value
+
+cat("ARIMA model order: ARIMA(",
+    arima_model$arma[1], ",",
+    arima_model$arma[6], ",",
+    arima_model$arma[2], ")\n")
+cat("ADF p-value:", round(adf_p, 4), "\n")
+cat("Ljung-Box p-value:", round(lb_p, 4), "\n\n")
+
+if (d_order >= 1 && lb_p > 0.05) {
+  cat("Conclusion: Price series requires differencing (d >= 1) and residuals show\n",
+      "no significant autocorrelation. This is consistent with a RANDOM WALK —\n",
+      "past prices do not predict future prices beyond what is already priced in.\n")
+} else if (lb_p <= 0.05) {
+  cat("Conclusion: Significant autocorrelation remains in residuals (Ljung-Box p =",
+      round(lb_p, 4), ").\n",
+      "Past prices carry predictive information — the series is NOT a pure random walk.\n",
+      "This suggests price movements are autocorrelated, potentially reflecting\n",
+      "the market updating on new information in a non-random pattern.\n")
+} else {
+  cat("Conclusion: Mixed evidence. Inspect ACF plot and model order for further insight.\n")
+}
+```
+
+---
+
+## Repeat Across Multiple Contracts
+
+Run the same analysis across several contracts to see whether the random walk result generalizes.
+
+```{r multi-contract, fig.height=8}
+# Pick top 5 most-traded contracts
+top_tickers <- trade_counts$ticker[1:5]
+
+results <- map_dfr(top_tickers, function(tkr) {
+  df <- trades %>%
+    filter(ticker == tkr) %>%
+    arrange(created_time)
+
+  if (nrow(df) < 20) return(NULL)
+
+  ts_data <- ts(df$yes_price)
+
+  tryCatch({
+    model <- auto.arima(ts_data, stepwise = TRUE, approximation = TRUE)
+    lb <- Box.test(residuals(model), lag = 10, type = "Ljung-Box")
+    adf <- adf.test(ts_data)
+
+    tibble(
+      ticker = tkr,
+      n_trades = nrow(df),
+      outcome = unique(df$outcome)[1],
+      arima_order = paste0("(", model$arma[1], ",", model$arma[6], ",", model$arma[2], ")"),
+      d_order = model$arma[6],
+      adf_p = round(adf$p.value, 4),
+      ljung_box_p = round(lb$p.value, 4),
+      random_walk = ifelse(model$arma[6] >= 1 & lb$p.value > 0.05, "Yes", "No")
+    )
+  }, error = function(e) NULL)
+})
+
+print(results)
+```
+
+```{r acf-grid, fig.height=10}
+# ACF plots for top contracts
+par(mfrow = c(ceiling(length(top_tickers) / 2), 2))
+
+for (tkr in top_tickers) {
+  df <- trades %>%
+    filter(ticker == tkr) %>%
+    arrange(created_time)
+
+  if (nrow(df) < 20) next
+
+  tryCatch({
+    model <- auto.arima(ts(df$yes_price), stepwise = TRUE, approximation = TRUE)
+    acf(residuals(model),
+        main = paste0(substr(tkr, 1, 30), "\nARIMA", paste0("(", model$arma[1], ",", model$arma[6], ",", model$arma[2], ")")),
+        lag.max = 20)
+  }, error = function(e) NULL)
+}
+
+par(mfrow = c(1, 1))
+```
