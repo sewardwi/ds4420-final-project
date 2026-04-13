@@ -29,7 +29,7 @@ glimpse(trades)
 
 ## Pick a Representative Contract
 
-We select a contract with enough trades to fit a time series model. We use `yes_price` as the price series.
+Select a contract with enough trades to fit a time series model, use `yes_price` as the price series.
 
 ```{r select-contract}
 # Find contracts with the most trades
@@ -71,7 +71,7 @@ ggplot(contract_trades, aes(x = created_time, y = yes_price)) +
 
 ## ACF and PACF of Raw Price Series
 
-Before fitting ARIMA, we inspect autocorrelation in the raw price series.
+Before fitting ARIMA, inspect autocorrelation in the raw price series.
 
 ```{r acf-raw}
 price_ts <- ts(contract_trades$yes_price)
@@ -86,7 +86,7 @@ par(mfrow = c(1, 1))
 
 ## Stationarity Test (ADF)
 
-An Augmented Dickey-Fuller test checks for a unit root — a hallmark of a random walk.
+An Augmented Dickey-Fuller test checks for a unit root, a hallmark of a random walk.
 
 - **Null hypothesis**: series has a unit root (random walk / non-stationary)
 - **p < 0.05**: reject the null → series is stationary
@@ -100,7 +100,8 @@ print(adf_result)
 
 ## Fit ARIMA Model
 
-We use `auto.arima()` to select the best ARIMA(p, d, q) model based on AIC. A model with `d = 1` indicates the series needed differencing — consistent with a random walk.
+Use `auto.arima()` to select the best ARIMA(p, d, q) model based on AIC. 
+A model with `d = 1` indicates the series needed differencing, which is consistent with a random walk.
 
 ```{r fit-arima}
 arima_model <- auto.arima(price_ts, stepwise = FALSE, approximation = FALSE)
@@ -111,7 +112,7 @@ summary(arima_model)
 
 ## Residual Diagnostics
 
-If prices are a **random walk**, ARIMA residuals should be white noise — no autocorrelation.
+If prices are a random walk, ARIMA residuals should be white noise with no autocorrelation.
 If residuals show autocorrelation, past prices carry predictive information.
 
 ```{r residual-diagnostics}
