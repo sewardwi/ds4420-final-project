@@ -17,7 +17,7 @@ library(tseries)
 ```{r load-data}
 trades <- read_csv("trades_clean.csv")
 
-# Parse timestamps, sort by contract then time
+# parse timestamps, sort by contract then time
 trades <- trades %>%
   mutate(created_time = as.POSIXct(created_time, tz = "UTC")) %>%
   arrange(ticker, created_time)
@@ -32,13 +32,13 @@ glimpse(trades)
 Select a contract with enough trades to fit a time series model, use `yes_price` as the price series.
 
 ```{r select-contract}
-# Find contracts with the most trades
+# find contracts with the most trades
 trade_counts <- trades %>%
   count(ticker, sort = TRUE)
 
 print(head(trade_counts, 10))
 
-# Use the most-traded contract
+# use the most-traded contract
 selected_ticker <- trade_counts$ticker[1]
 cat("Selected ticker:", selected_ticker, "\n")
 
@@ -89,7 +89,7 @@ par(mfrow = c(1, 1))
 An Augmented Dickey-Fuller test checks for a unit root, a hallmark of a random walk.
 
 - **Null hypothesis**: series has a unit root (random walk / non-stationary)
-- **p < 0.05**: reject the null → series is stationary
+- **p < 0.05**: reject the null means series is stationary
 
 ```{r adf-test}
 adf_result <- adf.test(price_ts)
@@ -100,7 +100,7 @@ print(adf_result)
 
 ## Fit ARIMA Model
 
-Use `auto.arima()` to select the best ARIMA(p, d, q) model based on AIC. 
+Select the best ARIMA(p, d, q) model based on AIC. 
 A model with `d = 1` indicates the series needed differencing, which is consistent with a random walk.
 
 ```{r fit-arima}
@@ -132,7 +132,7 @@ acf(residuals(arima_model),
 Formally tests whether residuals are white noise across multiple lags.
 
 - **Null hypothesis**: residuals are white noise (random walk behavior)
-- **p < 0.05**: significant autocorrelation remains → past prices are predictive
+- **p < 0.05**: significant autocorrelation remains means past prices are predictive
 
 ```{r ljung-box}
 lb_test <- Box.test(residuals(arima_model), lag = 20, type = "Ljung-Box")
@@ -154,21 +154,12 @@ cat("ARIMA model order: ARIMA(",
     arima_model$arma[2], ")\n")
 cat("ADF p-value:", round(adf_p, 4), "\n")
 cat("Ljung-Box p-value:", round(lb_p, 4), "\n\n")
-
-if (d_order >= 1 && lb_p > 0.05) {
-  cat("Conclusion: Price series requires differencing (d >= 1) and residuals show\n",
-      "no significant autocorrelation. This is consistent with a RANDOM WALK —\n",
-      "past prices do not predict future prices beyond what is already priced in.\n")
-} else if (lb_p <= 0.05) {
-  cat("Conclusion: Significant autocorrelation remains in residuals (Ljung-Box p =",
-      round(lb_p, 4), ").\n",
-      "Past prices carry predictive information — the series is NOT a pure random walk.\n",
-      "This suggests price movements are autocorrelated, potentially reflecting\n",
-      "the market updating on new information in a non-random pattern.\n")
-} else {
-  cat("Conclusion: Mixed evidence. Inspect ACF plot and model order for further insight.\n")
-}
 ```
+
+Conclusion: Significant autocorrelation remains in residuals (Ljung-Box p = 0).
+Past prices carry predictive information, meaning the series is NOT a pure random walk.
+This suggests price movements are autocorrelated, potentially reflecting
+the market updating on new information in a non-random pattern.
 
 ---
 
@@ -177,7 +168,7 @@ if (d_order >= 1 && lb_p > 0.05) {
 Run the same analysis across several contracts to see whether the random walk result generalizes.
 
 ```{r multi-contract, fig.height=8}
-# Pick top 5 most-traded contracts
+# pick top 5 most-traded contracts
 top_tickers <- trade_counts$ticker[1:5]
 
 results <- map_dfr(top_tickers, function(tkr) {

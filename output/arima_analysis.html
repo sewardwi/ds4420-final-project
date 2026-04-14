@@ -359,7 +359,7 @@ Prices</h1>
 <h2>Load and Prepare Data</h2>
 <pre class="r"><code>trades &lt;- read_csv(&quot;trades_clean.csv&quot;)
 
-# Parse timestamps, sort by contract then time
+# parse timestamps, sort by contract then time
 trades &lt;- trades %&gt;%
   mutate(created_time = as.POSIXct(created_time, tz = &quot;UTC&quot;)) %&gt;%
   arrange(ticker, created_time)
@@ -385,7 +385,7 @@ glimpse(trades)</code></pre>
 <h2>Pick a Representative Contract</h2>
 <p>Select a contract with enough trades to fit a time series model, use
 <code>yes_price</code> as the price series.</p>
-<pre class="r"><code># Find contracts with the most trades
+<pre class="r"><code># find contracts with the most trades
 trade_counts &lt;- trades %&gt;%
   count(ticker, sort = TRUE)
 
@@ -403,7 +403,7 @@ print(head(trade_counts, 10))</code></pre>
 ##  8 KXNBASPREAD-26APR02SASLAC-SAS10         2456
 ##  9 KXNBASPREAD-26APR02SASLAC-SAS4          2181
 ## 10 KXATPCHALLENGERMATCH-26APR02HEIPRA-HEI  2096</code></pre>
-<pre class="r"><code># Use the most-traded contract
+<pre class="r"><code># use the most-traded contract
 selected_ticker &lt;- trade_counts$ticker[1]
 cat(&quot;Selected ticker:&quot;, selected_ticker, &quot;\n&quot;)</code></pre>
 <pre><code>## Selected ticker: KXUSAIRANAGREEMENT-27-26APR</code></pre>
@@ -452,7 +452,7 @@ a random walk.</p>
 <ul>
 <li><strong>Null hypothesis</strong>: series has a unit root (random
 walk / non-stationary)</li>
-<li><strong>p &lt; 0.05</strong>: reject the null → series is
+<li><strong>p &lt; 0.05</strong>: reject the null means series is
 stationary</li>
 </ul>
 <pre class="r"><code>adf_result &lt;- adf.test(price_ts)
@@ -467,9 +467,9 @@ print(adf_result)</code></pre>
 </div>
 <div id="fit-arima-model" class="section level2">
 <h2>Fit ARIMA Model</h2>
-<p>Use <code>auto.arima()</code> to select the best ARIMA(p, d, q) model
-based on AIC. A model with <code>d = 1</code> indicates the series
-needed differencing, which is consistent with a random walk.</p>
+<p>Select the best ARIMA(p, d, q) model based on AIC. A model with
+<code>d = 1</code> indicates the series needed differencing, which is
+consistent with a random walk.</p>
 <pre class="r"><code>arima_model &lt;- auto.arima(price_ts, stepwise = FALSE, approximation = FALSE)
 summary(arima_model)</code></pre>
 <pre><code>## Series: price_ts 
@@ -517,8 +517,8 @@ lags.</p>
 <ul>
 <li><strong>Null hypothesis</strong>: residuals are white noise (random
 walk behavior)</li>
-<li><strong>p &lt; 0.05</strong>: significant autocorrelation remains →
-past prices are predictive</li>
+<li><strong>p &lt; 0.05</strong>: significant autocorrelation remains
+means past prices are predictive</li>
 </ul>
 <pre class="r"><code>lb_test &lt;- Box.test(residuals(arima_model), lag = 20, type = &quot;Ljung-Box&quot;)
 print(lb_test)</code></pre>
@@ -544,30 +544,18 @@ cat(&quot;ARIMA model order: ARIMA(&quot;,
 <pre><code>## ADF p-value: 0.01</code></pre>
 <pre class="r"><code>cat(&quot;Ljung-Box p-value:&quot;, round(lb_p, 4), &quot;\n\n&quot;)</code></pre>
 <pre><code>## Ljung-Box p-value: 0</code></pre>
-<pre class="r"><code>if (d_order &gt;= 1 &amp;&amp; lb_p &gt; 0.05) {
-  cat(&quot;Conclusion: Price series requires differencing (d &gt;= 1) and residuals show\n&quot;,
-      &quot;no significant autocorrelation. This is consistent with a RANDOM WALK —\n&quot;,
-      &quot;past prices do not predict future prices beyond what is already priced in.\n&quot;)
-} else if (lb_p &lt;= 0.05) {
-  cat(&quot;Conclusion: Significant autocorrelation remains in residuals (Ljung-Box p =&quot;,
-      round(lb_p, 4), &quot;).\n&quot;,
-      &quot;Past prices carry predictive information — the series is NOT a pure random walk.\n&quot;,
-      &quot;This suggests price movements are autocorrelated, potentially reflecting\n&quot;,
-      &quot;the market updating on new information in a non-random pattern.\n&quot;)
-} else {
-  cat(&quot;Conclusion: Mixed evidence. Inspect ACF plot and model order for further insight.\n&quot;)
-}</code></pre>
-<pre><code>## Conclusion: Significant autocorrelation remains in residuals (Ljung-Box p = 0 ).
-##  Past prices carry predictive information — the series is NOT a pure random walk.
-##  This suggests price movements are autocorrelated, potentially reflecting
-##  the market updating on new information in a non-random pattern.</code></pre>
+<p>Conclusion: Significant autocorrelation remains in residuals
+(Ljung-Box p = 0). Past prices carry predictive information, meaning the
+series is NOT a pure random walk. This suggests price movements are
+autocorrelated, potentially reflecting the market updating on new
+information in a non-random pattern.</p>
 <hr />
 </div>
 <div id="repeat-across-multiple-contracts" class="section level2">
 <h2>Repeat Across Multiple Contracts</h2>
 <p>Run the same analysis across several contracts to see whether the
 random walk result generalizes.</p>
-<pre class="r"><code># Pick top 5 most-traded contracts
+<pre class="r"><code># pick top 5 most-traded contracts
 top_tickers &lt;- trade_counts$ticker[1:5]
 
 results &lt;- map_dfr(top_tickers, function(tkr) {
