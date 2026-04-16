@@ -4,10 +4,12 @@ output: html_document
 ---
 
 ```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE,
+                      message = FALSE, fig.width = 9, fig.height = 5)
 library(tidyverse)
 library(forecast)
 library(tseries)
+library(scales)
 ```
 
 ---
@@ -15,50 +17,41 @@ library(tseries)
 ## Load and Prepare Data
 
 ```{r load-data}
-trades <- read_csv("trades_clean.csv")
+trades_raw <- read_csv("trades_clean.csv")
+trades_mutate <- mutate(trades_raw,
+                        created_time = as.POSIXct(created_time, tz = "UTC"))
+trades <- arrange(trades_mutate, ticker, created_time)
 
-# parse timestamps, sort by contract then time
-trades <- trades %>%
-  mutate(created_time = as.POSIXct(created_time, tz = "UTC")) %>%
-  arrange(ticker, created_time)
+ticker_outcomes <- distinct(trades, ticker, outcome)
+trade_counts_raw <- count(trades, ticker, sort = TRUE)
+trade_counts <- left_join(trade_counts_raw, ticker_outcomes, by = "ticker")
 
-glimpse(trades)
+cat("Total trades:", nrow(trades), "\n")
+cat("Unique tickers:", n_distinct(trades$ticker), "\n")
+cat("Tickers with >= 20 trades:", sum(trade_counts$n >= 20), "\n")
 ```
 
 ---
 
-## Pick a Representative Contract
-
-Select a contract with enough trades to fit a time series model, use `yes_price` as the price series.
+## Single Contract Detailed Walkthrough
 
 ```{r select-contract}
-# find contracts with the most trades
-trade_counts <- trades %>%
-  count(ticker, sort = TRUE)
-
-print(head(trade_counts, 10))
-
-# use the most-traded contract
 selected_ticker <- trade_counts$ticker[1]
 cat("Selected ticker:", selected_ticker, "\n")
 
-contract_trades <- trades %>%
-  filter(ticker == selected_ticker) %>%
-  select(created_time, yes_price, outcome) %>%
-  arrange(created_time)
+contract_trades_raw <- filter(trades, ticker == selected_ticker)
+contract_trades_sel <- select(contract_trades_raw,
+                              created_time, yes_price, outcome)
+contract_trades <- arrange(contract_trades_sel, created_time)
 
 cat("Number of trades:", nrow(contract_trades), "\n")
 cat("Outcome:", unique(contract_trades$outcome), "\n")
 ```
 
----
-
-## Price Series Plot
-
 ```{r plot-price}
 ggplot(contract_trades, aes(x = created_time, y = yes_price)) +
   geom_line(color = "steelblue") +
-  geom_point(size = 0.8, alpha = 0.5) +
+  geom_point(size = 0.6, alpha = 0.4) +
   labs(
     title = paste("Yes Price Over Time:", selected_ticker),
     x = "Time",
@@ -67,11 +60,7 @@ ggplot(contract_trades, aes(x = created_time, y = yes_price)) +
   theme_minimal()
 ```
 
----
-
-## ACF and PACF of Raw Price Series
-
-Before fitting ARIMA, inspect autocorrelation in the raw price series.
+### ACF and PACF of Raw Price Series
 
 ```{r acf-raw}
 price_ts <- ts(contract_trades$yes_price)
@@ -82,143 +71,284 @@ pacf(price_ts, main = "PACF of Yes Price", lag.max = 30)
 par(mfrow = c(1, 1))
 ```
 
----
-
-## Stationarity Test (ADF)
-
-An Augmented Dickey-Fuller test checks for a unit root, a hallmark of a random walk.
-
-- **Null hypothesis**: series has a unit root (random walk / non-stationary)
-- **p < 0.05**: reject the null means series is stationary
+### Stationarity Test (ADF)
 
 ```{r adf-test}
 adf_result <- adf.test(price_ts)
 print(adf_result)
 ```
 
----
-
-## Fit ARIMA Model
-
-Select the best ARIMA(p, d, q) model based on AIC. 
-A model with `d = 1` indicates the series needed differencing, which is consistent with a random walk.
+### Fit ARIMA Model
 
 ```{r fit-arima}
 arima_model <- auto.arima(price_ts, stepwise = FALSE, approximation = FALSE)
 summary(arima_model)
 ```
 
----
-
-## Residual Diagnostics
-
-If prices are a random walk, ARIMA residuals should be white noise with no autocorrelation.
-If residuals show autocorrelation, past prices carry predictive information.
+### Residual Diagnostics
 
 ```{r residual-diagnostics}
 checkresiduals(arima_model)
 ```
 
-```{r acf-residuals}
-acf(residuals(arima_model),
-    main = paste("ACF of ARIMA Residuals\n(", selected_ticker, ")"),
-    lag.max = 30)
-```
-
----
-
-## Ljung-Box Test on Residuals
-
-Formally tests whether residuals are white noise across multiple lags.
-
-- **Null hypothesis**: residuals are white noise (random walk behavior)
-- **p < 0.05**: significant autocorrelation remains means past prices are predictive
-
-```{r ljung-box}
-lb_test <- Box.test(residuals(arima_model), lag = 20, type = "Ljung-Box")
-print(lb_test)
-```
-
----
-
-## Interpretation
-
 ```{r interpretation}
-d_order <- arima_model$arma[6]  # differencing order from auto.arima
-lb_p <- lb_test$p.value
-adf_p <- adf_result$p.value
-
 cat("ARIMA model order: ARIMA(",
     arima_model$arma[1], ",",
     arima_model$arma[6], ",",
     arima_model$arma[2], ")\n")
-cat("ADF p-value:", round(adf_p, 4), "\n")
-cat("Ljung-Box p-value:", round(lb_p, 4), "\n\n")
 ```
-
-Conclusion: Significant autocorrelation remains in residuals (Ljung-Box p = 0).
-Past prices carry predictive information, meaning the series is NOT a pure random walk.
-This suggests price movements are autocorrelated, potentially reflecting
-the market updating on new information in a non-random pattern.
 
 ---
 
-## Repeat Across Multiple Contracts
+## ARIMA Across All Tickers
 
-Run the same analysis across several contracts to see whether the random walk result generalizes.
+Run auto.arima on every ticker with at least 20 trades
 
-```{r multi-contract, fig.height=8}
-# pick top 5 most-traded contracts
-top_tickers <- trade_counts$ticker[1:5]
+```{r multi-ticker, cache=TRUE}
+eligible_tickers <- pull(filter(trade_counts, n >= 20), ticker)
 
-results <- map_dfr(top_tickers, function(tkr) {
-  df <- trades %>%
-    filter(ticker == tkr) %>%
-    arrange(created_time)
-
-  if (nrow(df) < 20) return(NULL)
+fit_arima_ticker <- function(tkr) {
+  df <- arrange(filter(trades, ticker == tkr), created_time) # nolint
 
   ts_data <- ts(df$yes_price)
+  n <- length(ts_data)
+  n_train <- floor(n * 0.8)
 
   tryCatch({
-    model <- auto.arima(ts_data, stepwise = TRUE, approximation = TRUE)
-    lb <- Box.test(residuals(model), lag = 10, type = "Ljung-Box")
+    # fit on training portion
+    train_ts <- ts(ts_data[1:n_train])
+    model <- auto.arima(train_ts, stepwise = TRUE, approximation = TRUE)
+
+    # forecast test portion
+    n_test <- n - n_train
+    fcast <- forecast(model, h = n_test)
+    test_vals <- as.numeric(ts_data[(n_train + 1):n])
+    rmse <- sqrt(mean((fcast$mean - test_vals)^2))
+    mae <- mean(abs(fcast$mean - test_vals))
+
+    # diagnostics on full-series model
+    full_model <- auto.arima(ts_data, stepwise = TRUE, approximation = TRUE)
+    lb <- Box.test(residuals(full_model),
+                   lag = min(20, floor(n / 3)),
+                   type = "Ljung-Box")
     adf <- adf.test(ts_data)
 
-    tibble(
+    data.frame(
       ticker = tkr,
-      n_trades = nrow(df),
-      outcome = unique(df$outcome)[1],
-      arima_order = paste0("(", model$arma[1], ",", model$arma[6], ",", model$arma[2], ")"),
-      d_order = model$arma[6],
+      n_trades = n,
+      outcome = as.integer(unique(df$outcome)[1]),
+      p = full_model$arma[1],
+      d = full_model$arma[6],
+      q = full_model$arma[2],
+      arima_order = paste0("ARIMA(", full_model$arma[1], ",",
+                           full_model$arma[6], ",",
+                           full_model$arma[2], ")"),
+      aic = round(AIC(full_model), 2),
       adf_p = round(adf$p.value, 4),
-      ljung_box_p = round(lb$p.value, 4),
-      random_walk = ifelse(model$arma[6] >= 1 & lb$p.value > 0.05, "Yes", "No")
+      lb_p = round(lb$p.value, 4),
+      rmse = round(rmse, 4),
+      mae = round(mae, 4),
+      random_walk = ifelse(full_model$arma[6] >= 1 & lb$p.value > 0.05,
+                           "Yes", "No"),
+      stringsAsFactors = FALSE
     )
-  }, error = function(e) NULL)
-})
-
-print(results)
-```
-
-```{r acf-grid, fig.height=10}
-# ACF plots for top contracts
-par(mfrow = c(ceiling(length(top_tickers) / 2), 2))
-
-for (tkr in top_tickers) {
-  df <- trades %>%
-    filter(ticker == tkr) %>%
-    arrange(created_time)
-
-  if (nrow(df) < 20) next
-
-  tryCatch({
-    model <- auto.arima(ts(df$yes_price), stepwise = TRUE, approximation = TRUE)
-    acf(residuals(model),
-        main = paste0(substr(tkr, 1, 30), "\nARIMA", paste0("(", model$arma[1], ",", model$arma[6], ",", model$arma[2], ")")),
-        lag.max = 20)
   }, error = function(e) NULL)
 }
 
-par(mfrow = c(1, 1))
+results <- map_dfr(eligible_tickers, fit_arima_ticker)
+
+cat("Tickers successfully fit:", nrow(results), "\n")
+cat("Random walk tickers:", sum(results$random_walk == "Yes"),
+    "/", nrow(results), "\n")
+```
+
+### Results Summary Table (Top 20 by Trade Count)
+
+```{r summary-table}
+results_sorted <- arrange(results, desc(n_trades))
+results_top20 <- head(results_sorted, 20)
+results_display <- select(results_top20, ticker, n_trades, outcome,
+                          arima_order, adf_p, lb_p, rmse, random_walk)
+knitr::kable(results_display, digits = 4,
+             caption = "ARIMA Results for Top 20 Most-Traded Tickers")
+```
+
+---
+
+## Aggregate Visualizations
+
+### 1. Ljung-Box p-Value Distribution
+
+```{r plot-lb-dist}
+ggplot(results, aes(x = lb_p, fill = random_walk)) +
+  geom_histogram(bins = 40, color = "white", alpha = 0.85) +
+  geom_vline(xintercept = 0.05, linetype = "dashed",
+             color = "black", linewidth = 0.8) +
+  annotate("text", x = 0.08, y = Inf,
+           label = "p = 0.05", vjust = 2, size = 3.5) +
+  scale_fill_manual(values = c("Yes" = "#4CAF50", "No" = "#FF5722")) +
+  labs(
+    title = "Distribution of Ljung-Box p-Values Across All Tickers",
+    x = "Ljung-Box p-Value",
+    y = "Number of Tickers",
+    fill = "Pure Random Walk?"
+  ) +
+  theme_minimal(base_size = 13)
+```
+
+### 2. Random Walk Classification by Outcome
+
+Do correctly-resolved contracts look more like random walks?
+
+```{r plot-rw-outcome}
+results_labeled <- mutate(results,
+                          outcome_label = ifelse(outcome == 1,
+                                                 "Resolved YES",
+                                                 "Resolved NO"))
+rw_outcome_counts <- count(results_labeled, outcome_label, random_walk)
+rw_outcome_grp <- group_by(rw_outcome_counts, outcome_label)
+rw_outcome <- mutate(rw_outcome_grp, pct = n / sum(n))
+
+ggplot(rw_outcome, aes(x = outcome_label, y = pct, fill = random_walk)) +
+  geom_col(position = "stack", width = 0.55) +
+  geom_text(aes(label = scales::percent(pct, accuracy = 1)),
+            position = position_stack(vjust = 0.5),
+            color = "white", size = 4.5, fontface = "bold") +
+  scale_fill_manual(values = c("Yes" = "#4CAF50", "No" = "#FF5722")) +
+  scale_y_continuous(labels = scales::percent) +
+  labs(
+    title = "Random Walk Classification by Contract Outcome",
+    x = "Contract Outcome",
+    y = "Proportion of Tickers",
+    fill = "Pure Random Walk?"
+  ) +
+  theme_minimal(base_size = 13)
+```
+
+### 3. Out-of-Sample RMSE Distribution
+
+```{r plot-rmse-dist}
+median_rmse <- median(results$rmse, na.rm = TRUE)
+
+ggplot(results, aes(x = rmse)) +
+  geom_histogram(bins = 40, fill = "#7B1FA2", color = "white", alpha = 0.85) +
+  geom_vline(xintercept = median_rmse,
+             linetype = "dashed", color = "black", linewidth = 0.8) +
+  annotate("text", x = median_rmse + 0.002, y = Inf,
+           label = paste0("Median: ", round(median_rmse, 3)),
+           vjust = 2, hjust = 0, size = 3.5) +
+  labs(
+    title = "Out-of-Sample RMSE Distribution Across All Tickers",
+    subtitle = "Trained on 80% of trades, forecasted remaining 20%",
+    x = "RMSE (yes_price scale, 0\u20131)",
+    y = "Number of Tickers"
+  ) +
+  theme_minimal(base_size = 13)
+```
+
+### 4. ADF p-Value Distribution
+
+```{r plot-adf-dist}
+adf_summary <- mutate(results,
+                      stationary = ifelse(adf_p < 0.05,
+                                          "Stationary (p < 0.05)",
+                                          "Non-stationary (p \u2265 0.05)"))
+
+ggplot(adf_summary, aes(x = adf_p, fill = stationary)) +
+  geom_histogram(bins = 40, color = "white", alpha = 0.85) +
+  geom_vline(xintercept = 0.05, linetype = "dashed",
+             color = "black", linewidth = 0.8) +
+  scale_fill_manual(values = c("Stationary (p < 0.05)" = "#00897B",
+                               "Non-stationary (p \u2265 0.05)" = "#E65100")) +
+  labs(
+    title = "ADF Test p-Value Distribution Across All Tickers",
+    x = "ADF p-Value",
+    y = "Number of Tickers",
+    fill = NULL
+  ) +
+  theme_minimal(base_size = 13)
+```
+
+### 5
+
+```{r aggregate-by-outcome}
+results_by_outcome <- mutate(results,
+                             outcome_label = ifelse(outcome == 1,
+                                                    "Resolved YES",
+                                                    "Resolved NO"))
+results_grouped <- group_by(results_by_outcome, outcome_label)
+outcome_summary <- summarise(results_grouped,
+  n_tickers = n(),
+  pct_random_walk = round(mean(random_walk == "Yes") * 100, 1),
+  median_rmse = round(median(rmse, na.rm = TRUE), 4)
+)
+knitr::kable(outcome_summary, caption = "ARIMA Results by Contract Outcome")
+```
+
+---
+
+## Forecast: Top Contract
+
+```{r forecast-plot}
+ex_ticker <- trade_counts$ticker[1]
+ex_df_raw <- filter(trades, ticker == ex_ticker)
+ex_df <- arrange(ex_df_raw, created_time)
+n_ex <- nrow(ex_df)
+n_train <- floor(n_ex * 0.8)
+
+train_ts <- ts(ex_df$yes_price[1:n_train])
+ex_model <- auto.arima(train_ts, stepwise = TRUE, approximation = TRUE)
+n_test <- n_ex - n_train
+ex_fcast <- forecast(ex_model, h = n_test)
+
+fcast_df <- data.frame(
+  idx = (n_train + 1):n_ex,
+  actual = ex_df$yes_price[(n_train + 1):n_ex],
+  forecast = as.numeric(ex_fcast$mean),
+  lo80 = as.numeric(ex_fcast$lower[, 1]),
+  hi80 = as.numeric(ex_fcast$upper[, 1]),
+  lo95 = as.numeric(ex_fcast$lower[, 2]),
+  hi95 = as.numeric(ex_fcast$upper[, 2])
+)
+
+train_df <- data.frame(idx = 1:n_train, actual = ex_df$yes_price[1:n_train])
+
+forecast_rmse <- round(sqrt(mean((fcast_df$forecast - fcast_df$actual)^2)), 4)
+model_label <- paste0("ARIMA(", ex_model$arma[1], ",",
+                      ex_model$arma[6], ",", ex_model$arma[2], ")")
+
+ggplot() +
+  geom_line(data = train_df,
+            aes(x = idx, y = actual),
+            color = "steelblue", alpha = 0.7) +
+  geom_ribbon(data = fcast_df, aes(x = idx, ymin = lo95, ymax = hi95),
+              fill = "#FF9800", alpha = 0.2) +
+  geom_ribbon(data = fcast_df, aes(x = idx, ymin = lo80, ymax = hi80),
+              fill = "#FF9800", alpha = 0.35) +
+  geom_line(data = fcast_df,
+            aes(x = idx, y = forecast),
+            color = "#FF9800", linewidth = 1) +
+  geom_line(data = fcast_df,
+            aes(x = idx, y = actual),
+            color = "black", linewidth = 0.7) +
+  geom_vline(xintercept = n_train, linetype = "dashed", color = "gray40") +
+  annotate("text", x = n_train - 5, y = max(ex_df$yes_price) * 0.95,
+           label = "Train", hjust = 1, size = 3.5, color = "steelblue") +
+  annotate("text", x = n_train + 5, y = max(ex_df$yes_price) * 0.95,
+           label = "Forecast", hjust = 0, size = 3.5, color = "#FF9800") +
+  labs(
+    title = paste("ARIMA Forecast vs Actual:", substr(ex_ticker, 1, 45)),
+    subtitle = paste0("Model: ", model_label, " | RMSE: ", forecast_rmse),
+    x = "Trade Index",
+    y = "Yes Price (implied probability)"
+  ) +
+  theme_minimal(base_size = 13)
+```
+
+---
+
+## Save Results
+
+```{r save-results}
+write_csv(results, "output/arima_results_all_tickers.csv")
 ```
